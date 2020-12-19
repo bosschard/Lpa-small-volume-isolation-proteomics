@@ -1,0 +1,461 @@
+---
+title: 'Small Volume Lipoprotein (a) Isolation Guide for Clinical Research: Proteomics Data Analysis'
+author: "P Bergstrom"
+date: "December 18, 2020"
+output:
+  html_document:
+    code_folding: hide
+    highlight: haddock
+    theme: spacelab
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE, message=FALSE}
+library(ggplot2, quietly = TRUE)
+library(RColorBrewer, quietly = TRUE)
+library(pheatmap, quietly = TRUE)
+library(dplyr, quietly = TRUE)
+library(kableExtra, quietly = TRUE)
+library(grid, quietly = TRUE)
+library(edgeR, quietly = TRUE)
+library(ggrepel, quietly = TRUE)
+library(ggbiplot, quietly = TRUE)
+library(eulerr, quietly = TRUE)
+library(mclust, quietly = TRUE)
+library(psych, quietly = TRUE)
+library(readxl, quietly = TRUE)
+library(reshape2, quietly = TRUE)
+library(limma, quietly = TRUE)
+library(ggfortify, quietly = TRUE)
+library(extrafont, quietly = TRUE)
+```
+
+## Results
+Protein list trimmed to exclude any proteins that did not appear in at least 75% of samples from at least one lipoprotein compartment.
+
+```{r}
+# importing lipoprotein fraction proteomics
+lpa_75 <- read_excel("Lp(a) small volume isolation proteomics.xlsx", sheet="Working list", col_names=TRUE)
+# replace 0s with NA for display
+lpa_NA <- lpa_75
+lpa_NA[lpa_NA == 0] <- NA
+# writing a scrollable embedded html table
+kable(lpa_NA, "html") %>% kable_styling("striped") %>% scroll_box(height="350px")
+```
+
+
+
+## Venn Diagram
+
+To count as a number present in a given lipoprotein group, it had to be detected in >75% of samples for that lipoprotein compartment.
+
+
+**Total proteins present in each lipoprotein group...**
+
+- Lp(a) = 32
+- HDL = 45
+- LDL = 52
+- VLDL = 22
+- All 4 lipoproteins = 18
+
+``` {r}
+# making venn diagram
+venn <- venn(c('Lp(a)'=1,'HDL'=4,'LDL'=11,'VLDL'=0,
+                 'LDL&HDL'=10,'LDL&HDL&Lp(a)'=9,'LDL&Lp(a)'=4,
+                 'VLDL&HDL'=4,'VLDL&LDL&HDL&Lp(a)'=18))
+plot(venn, fills=list(fill=brewer.pal(4,'Pastel1'), alpha=0.4), labels=list(fontsize=18),
+     edges=list(edge='black', alpha=1), legend=list(color='black', alpha=1))
+```
+
+
+
+## PCA Plot
+
+A principle component analysis was conducted, and score plots produced, to further investigate if there are distinct proteomic signatures for each lipoprotein species.
+
+
+``` {r}
+# making data frame out of transposed dataset
+lpa_trans <- read_excel("Lp(a) small volume isolation proteomics.xlsx", sheet="Transposed", col_names=TRUE)
+pca <- data.frame(lpa_trans[,3:63])
+
+# pca analysis (zeros included in dataset) and groups
+pca <- prcomp(pca, center=TRUE, scale.=TRUE)
+pca_type <- c(lpa_trans$Fraction)
+pca_type <- factor(pca_type, levels=c("Lp(a)", "HDL", "LDL", "VLDL"))
+
+# plotting PC1 vs PC2
+ggbiplot::ggbiplot(pca,  groups=pca_type, choices=1:2, ellipse=TRUE, var.axes=FALSE, alpha=0.8) +
+  labs(title='PC1 vs PC2', x='PC1 (33.5% explained variance)', y='PC2 (24.6% explained variance)', color='Lipoprotein') +
+  #scale_color_brewer(palette="Pastel1") +
+  scale_color_manual(values=c("#F8766D", "#00BFC4", "#7CAE00", "#C77CFF")) +
+  theme_linedraw() +
+  theme(plot.title=element_text(hjust=0.5, size=18), plot.subtitle=element_text(hjust=0.5, size=12), text=element_text(size=14))
+```
+
+
+
+## Heat Map
+
+Relative protein abundance was calculated as z-scores that were generated from adjusted spectral counts. Red, upregulated; blue, downregulated. Samples and proteins were clustered by complete Euclidian hierarchical cluster analysis.
+
+
+``` {r fig.asp=1.8, fig.align='center'}
+# import data from excel
+lpa_75 <- read_excel("Lp(a) small volume isolation proteomics.xlsx", sheet="Working list", col_names=TRUE)
+protdata <- as.matrix(lpa_75[,-1])
+protdata[protdata == 0] <- NA
+rownames <- lpa_75[,1]
+annotation_row <- data.frame(rownames)
+rownames(protdata) <- annotation_row$Protein
+
+# identify & remove rows giving NAs w/distance calculation
+giveNAs <- which(is.na(as.matrix(dist(protdata))), arr.ind=TRUE)
+tab <- sort(table(c(giveNAs)), decreasing=TRUE)
+checkNA <- sapply(1:length(tab), function(i){
+  sum(is.na(as.matrix(dist(protdata[-as.numeric(names(tab[1:i])),]))))
+})
+rmv <- names(tab)[1:min(which(checkNA==0))]
+protdata <- protdata[-as.numeric(rmv),]
+
+# plot
+pheatmap(log10(protdata), scale="row", border_color=NA, breaks=seq(-2,2,.01), color=colorRampPalette(rev(brewer.pal(n=7, name="RdYlBu")))(400),
+         cluster_cols=TRUE, cluster_rows=TRUE, cutree_cols=5, cutree_rows=8)
+```
+
+
+
+
+## Volcano Plots
+
+For comparisons between specific lipoprotein groups, significant changes in protein abundance was determined by an unpaired two-sided t-test, followed by Benjamini-Hochberg correction for multiple comparisons. A differentially expressed protein was selected by having greater than 2-fold change and  adjusted P value < 0.05.
+
+### Lp(a) vs HDL {.tabset}
+
+**Note:** All comparisons are relative to HDL - i.e. Lp(a) has significantly *more* APOB and significantly *less* APOA1 than HDL
+
+#### BH-adjusted P values
+
+```{r, echo=FALSE}
+# importing Lp(a) vs HDL analysis & making data frame
+lpa_hdl <- read_excel("Lp(a) small volume isolation proteomics.xlsx", sheet="Lp(a) vs HDL", col_names=TRUE)
+hdl <- data.frame("Protein"=lpa_hdl$Protein, "logFC"=lpa_hdl$log2FC, "logPValue"=lpa_hdl$log10p.value, "sig"=lpa_hdl$sig, "label"=lpa_hdl$label,
+                  "BHsig"=lpa_hdl$BHsig, "BHlabel"=lpa_hdl$BHlabel)
+
+# calculate BH-adjusted p values
+hdlAdj <- p.adjust(c(lpa_hdl$p.value), method="BH")
+hdlAdjLog <- -log10(hdlAdj)
+hdl <- data.frame(transform(hdl, AdjPValue=hdlAdj, logAdjPValue=hdlAdjLog))
+hdl$sig <- factor(hdl$sig, levels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig"))
+hdl$BHsig <- factor(hdl$BHsig, levels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig"))
+
+# plotting adjusted p values
+ggplot(hdl, aes(x=logFC, y=logAdjPValue)) +
+  geom_point(aes(color=BHsig), alpha=0.7) +
+  scale_color_manual(values=c("orange","firebrick","navy","black"),
+                     labels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig")) +
+  labs(title="Lp(a) vs HDL", x=expression(paste("log"[2],"(FC)")), y=expression(paste("-log"[10],"(Adj P Value)")), color="Significance") +
+  geom_text_repel(data=filter(hdl, BHlabel=="yes"), aes(label=Protein), size=4) +
+  scale_x_continuous(breaks=c(-3,-2,-1,0,1,2)) +
+  theme_bw() +
+  theme(legend.background=element_rect(fill="white", size=0.5, linetype="solid", colour="black"), 
+        axis.title=element_text(size=14), legend.text=element_text(hjust=0,size=12),
+        legend.title=element_text(hjust=0.5,size=14),
+        axis.text=element_text(size=12), plot.title=element_text(hjust=0.5, size=18)) +
+  geom_vline(xintercept = -1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_vline(xintercept = 1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_hline(yintercept = 1.3, linetype="dashed", colour="firebrick", alpha=0.5)
+```
+
+#### Non-adjusted P values
+
+```{r, echo=FALSE}
+# plotting non-adjusted p values
+ggplot(hdl, aes(x=logFC, y=logPValue)) +
+  geom_point(aes(color=sig), alpha=0.7) +
+  scale_color_manual(values=c("orange","firebrick","navy","black"),
+                     labels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig")) +
+  labs(title="Lp(a) vs HDL", x=expression(paste("log"[2],"(FC)")), y=expression(paste("-log"[10],"(P Value)")), color="Significance") +
+  geom_text_repel(data=filter(hdl, label=="yes"), aes(label=Protein), size=4) +
+  scale_x_continuous(breaks=c(-3,-2,-1,0,1,2)) +
+  theme_bw() +
+  theme(legend.background=element_rect(fill="white", size=0.5, linetype="solid", colour="black"), 
+        axis.title=element_text(size=14), legend.text=element_text(hjust=0,size=12),
+        legend.title=element_text(hjust=0.5,size=14),
+        axis.text=element_text(size=12), plot.title=element_text(hjust=0.5, size=18)) +
+  geom_vline(xintercept = -1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_vline(xintercept = 1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_hline(yintercept = 1.3, linetype="dashed", colour="firebrick", alpha=0.5)
+```
+
+
+#### Supplemental Table: Fold Change & P Values
+```{r}
+# making new table with desired data & names
+hdl_t <- data.frame("Protein"=hdl$Protein, "Mean HDL"=format(lpa_hdl$mean.hdl, digits=3, nsmall=0), "Mean Lp(a)"=lpa_hdl$mean.lpa, "Fold Change"=lpa_hdl$FC,
+                    "P-Value"=lpa_hdl$p.value, "BH P-Value"=hdl$AdjPValue, check.names=FALSE, stringsAsFactors=FALSE)
+
+# writing a scrollable embedded html table
+kbl(hdl_t, caption="Lp(a) vs HDL") %>%
+  row_spec(0, bold=TRUE) %>%
+  kable_classic(full_width=F, html_font="Times New Roman")
+```
+
+
+### Lp(a) vs LDL {.tabset}
+
+**Note:** All comparisons are relative to LDL - i.e. Lp(a) has significantly *more* LPA and significantly *less* C3 than LDL
+
+#### BH-adjusted P values
+
+```{r, echo=FALSE}
+# importing Lp(a) vs LDL analysis & making data frame
+lpa_ldl <- read_excel("Lp(a) small volume isolation proteomics.xlsx", sheet="Lp(a) vs LDL", col_names=TRUE)
+ldl <- data.frame("Protein"=lpa_ldl$Protein, "logFC"=lpa_ldl$log2FC, "logPValue"=lpa_ldl$log10p.value, "sig"=lpa_ldl$sig, "label"=lpa_ldl$label, "BHsig"=lpa_ldl$BHsig,
+                  "BHlabel"=lpa_ldl$BHlabel)
+
+# calculating BH-adjusted p values
+ldlAdj <- p.adjust(c(lpa_ldl$p.value), method="BH")
+ldlAdjLog <- -log10(ldlAdj)
+ldl <- data.frame(transform(ldl, AdjPValue=ldlAdj, logAdjPValue=ldlAdjLog))
+ldl$sig <- factor(ldl$sig, levels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig"))
+ldl$BHsig <- factor(ldl$BHsig, levels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig"))
+
+# plotting BH-adjusted P values
+ggplot(ldl, aes(x=logFC, y=logAdjPValue)) +
+  geom_point(aes(color=BHsig), alpha=0.7) +
+  scale_color_manual(values=c("firebrick","black"),
+                     labels=c("|FC|>2","Not Sig")) +
+  labs(title="Lp(a) vs LDL", x=expression(paste("log"[2],"(FC)")), y=expression(paste("-log"[10],"(Adj P Value)")), color="Significance") +
+  geom_text_repel(data=filter(ldl, BHlabel=="yes"), aes(label=Protein), size=4) +
+  scale_x_continuous(breaks=c(-3,-2,-1,0,1,2,3,4)) +
+  theme_bw() +
+  theme(legend.background=element_rect(fill="white", size=0.5, linetype="solid", colour="black"), 
+        axis.title=element_text(size=14), legend.text=element_text(hjust=0,size=12),
+        legend.title=element_text(hjust=0.5,size=14),
+        axis.text=element_text(size=12), plot.title=element_text(hjust=0.5, size=18)) +
+  geom_vline(xintercept = -1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_vline(xintercept = 1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_hline(yintercept = 1.3, linetype="dashed", colour="firebrick", alpha=0.5)
+```
+
+
+#### Non-adjusted P values
+
+``` {r, echo=FALSE}
+# plotting 
+ggplot(ldl, aes(x=logFC, y=logPValue)) +
+  geom_point(aes(color=sig), alpha=0.7) +
+  scale_color_manual(values=c("orange","firebrick","navy","black"),
+                     labels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig")) +
+  labs(title="Lp(a) vs LDL", x=expression(paste("log"[2],"(FC)")), y=expression(paste("-log"[10],"(P Value)")), color="Significance") +
+  geom_text_repel(data=filter(ldl, label=="yes"), aes(label=Protein), size=4) +
+  scale_x_continuous(breaks=c(-3,-2,-1,0,1,2,3,4)) +
+  theme_bw() +
+  theme(legend.background=element_rect(fill="white", size=0.5, linetype="solid", colour="black"), 
+        axis.title=element_text(size=14), legend.text=element_text(hjust=0,size=12),
+        legend.title=element_text(hjust=0.5,size=14),
+        axis.text=element_text(size=12), plot.title=element_text(hjust=0.5, size=18)) +
+  geom_vline(xintercept = -1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_vline(xintercept = 1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_hline(yintercept = 1.3, linetype="dashed", colour="firebrick", alpha=0.5)
+```
+
+#### Supplemental Table: Fold Change & P Values
+```{r}
+# making new table with desired data & names
+ldl_t <- data.frame("Protein"=ldl$Protein, "Mean LDL"=lpa_ldl$mean.ldl, "Mean Lp(a)"=lpa_ldl$mean.lpa, "Fold Change"=lpa_ldl$FC,
+                    "P-Value"=lpa_ldl$p.value, "BH P-Value"=ldl$AdjPValue, check.names=FALSE, stringsAsFactors=FALSE)
+
+# making a scrollable embedded html table
+kbl(ldl_t, caption="Lp(a) vs LDL") %>%
+  row_spec(0, bold=TRUE) %>%
+  kable_classic(full_width=F, html_font="Times New Roman")
+```
+
+
+
+
+### Lp(a) vs VLDL {.tabset}
+
+**Note:** All comparisons are relative to VLDL - i.e. Lp(a) has significantly *more* APOA1 and significantly *less* APOC3 than VLDL
+
+#### BH-adjusted P values
+
+```{r, echo=FALSE}
+# importing Lp(a) vs VLDL analysis & making data frame
+lpa_vldl <- read_excel("Lp(a) small volume isolation proteomics.xlsx", sheet="Lp(a) vs VLDL", col_names=TRUE)
+vldl <- data.frame("Protein"=lpa_vldl$Protein, "logFC"=lpa_vldl$log2FC, "logPValue"=lpa_vldl$log10p.value, "sig"=lpa_vldl$sig, "label"=lpa_vldl$label,
+                   "BHsig"=lpa_vldl$BHsig, "BHlabel"=lpa_vldl$BHlabel)
+
+# calculating BH-adjusted P values
+vldlAdj <- p.adjust(c(lpa_vldl$p.value), method="BH")
+vldlAdjLog <- -log10(vldlAdj)
+vldl <- data.frame(transform(vldl, AdjPValue=vldlAdj, logAdjPValue=vldlAdjLog))
+vldl$sig <- factor(vldl$sig, levels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig"))
+vldl$BHsig <- factor(vldl$BHsig, levels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig"))
+
+# plotting BH-adjusted P values
+ggplot(vldl, aes(x=logFC, y=logAdjPValue)) +
+  geom_point(aes(color=BHsig), alpha=0.7) +
+  scale_color_manual(values=c("orange","firebrick","black"),
+                     labels=c("|FC|>2 & P Value<0.05","|FC|>2","Not Sig")) +
+  labs(title="Lp(a) vs VLDL", x=expression(paste("log"[2],"(FC)")), y=expression(paste("-log"[10],"(Adj P Value)")), color="Significance") +
+  geom_text_repel(data=filter(vldl, BHlabel=="yes"), aes(label=Protein), size=4) +
+  scale_x_continuous(breaks=c(-3,-2,-1,0,1,2,3)) +
+  theme_bw() +
+  theme(legend.background=element_rect(fill="white", size=0.5, linetype="solid", colour="black"), 
+        axis.title=element_text(size=14), legend.text=element_text(hjust=0,size=12),
+        legend.title=element_text(hjust=0.5,size=14),
+        axis.text=element_text(size=12), plot.title=element_text(hjust=0.5, size=18)) +
+  geom_vline(xintercept = -1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_vline(xintercept = 1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_hline(yintercept = 1.3, linetype="dashed", colour="firebrick", alpha=0.5)
+```
+
+
+#### Non-adjusted P values
+
+``` {r, echo=FALSE}
+# plotting non-adjusted P values
+ggplot(vldl, aes(x=logFC, y=logPValue)) +
+  geom_point(aes(color=sig), alpha=0.7) +
+  scale_color_manual(values=c("orange","firebrick","navy","black"),
+                     labels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig")) +
+  labs(title="Lp(a) vs VLDL", x=expression(paste("log"[2],"(FC)")), y=expression(paste("-log"[10],"(P Value)")), color="Significance") +
+  geom_text_repel(data=filter(vldl, label=="yes"), aes(label=Protein), size=4) +
+  scale_x_continuous(breaks=c(-3,-2,-1,0,1,2,3)) +
+  theme_bw() +
+  theme(legend.background=element_rect(fill="white", size=0.5, linetype="solid", colour="black"), 
+        axis.title=element_text(size=14), legend.text=element_text(hjust=0,size=12),
+        legend.title=element_text(hjust=0.5,size=14),
+        axis.text=element_text(size=12), plot.title=element_text(hjust=0.5, size=18)) +
+  geom_vline(xintercept = -1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_vline(xintercept = 1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_hline(yintercept = 1.3, linetype="dashed", colour="firebrick", alpha=0.5)
+```
+
+#### Supplemental Table: Fold Change & P Values
+```{r}
+# making new table with desired data & names
+vldl_t <- data.frame("Protein"=vldl$Protein, "Fold Change"=lpa_vldl$FC, "Mean VLDL"=lpa_vldl$mean.vldl, "Mean Lp(a)"=lpa_vldl$mean.lpa,
+                     "P-Value"=lpa_vldl$p.value, "BH P-Value"=vldl$AdjPValue, check.names=FALSE, stringsAsFactors=FALSE)
+
+# writing a scrollable embedded html table 
+kbl(vldl_t, caption="Lp(a) vs VLDL") %>%
+  row_spec(0, bold=TRUE) %>%
+  kable_classic(full_width=F, html_font="Times New Roman")
+```
+
+
+### LDL vs HDL {.tabset}
+
+**Note:** All comparisons are relative to HDL - i.e. LDL has significantly *more* TLN1 & APOB and significantly *less* APOA1 than HDL
+
+#### BH-adjusted P values
+
+```{r, echo=FALSE}
+# importing LDL vs HDL analysis
+ldl_hdl <- read_excel("Lp(a) small volume isolation proteomics.xlsx", sheet="LDL vs HDL", col_names=TRUE)
+ldlhdl <- data.frame("Protein"=ldl_hdl$Protein, "logFC"=ldl_hdl$log2FC, "logPValue"=ldl_hdl$log10p.value, "sig"=ldl_hdl$sig, "label"=ldl_hdl$label,
+                     "BHsig"=ldl_hdl$BHsig, "BHlabel"=ldl_hdl$BHlabel)
+
+# calculate BH-adjusted p values
+ldl_hdlAdj <- p.adjust(c(ldl_hdl$p.value), method="BH")
+ldl_hdlAdjLog <- -log10(ldl_hdlAdj)
+ldlhdl <- data.frame(transform(ldlhdl, AdjPValue=ldl_hdlAdj, logAdjPValue=ldl_hdlAdjLog))
+ldlhdl$sig <- factor(ldlhdl$sig, levels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig"))
+ldlhdl$BHsig <- factor(ldlhdl$BHsig, levels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig"))
+
+# plotting BH-adjusted P values
+ggplot(ldlhdl, aes(x=logFC, y=logAdjPValue)) +
+  geom_point(aes(color=BHsig), alpha=0.7) +
+  scale_color_manual(values=c("orange","firebrick","navy","black"),
+                     labels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig")) +
+  labs(title="LDL vs HDL", x=expression(paste("log"[2],"(FC)")), y=expression(paste("-log"[10],"(Adj P Value)")), color="Significance") +
+  geom_text_repel(data=filter(ldlhdl, BHlabel=="yes"), aes(label=Protein), size=4) +
+  scale_x_continuous(breaks=c(-4,-3,-2,-1,0,1,2,3)) +
+  theme_bw() +
+  theme(legend.background=element_rect(fill="white", size=0.5, linetype="solid", colour="black"), 
+        axis.title=element_text(size=14), legend.text=element_text(hjust=0,size=12),
+        legend.title=element_text(hjust=0.5,size=14),
+        axis.text=element_text(size=12), plot.title=element_text(hjust=0.5, size=18)) +
+  geom_vline(xintercept = -1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_vline(xintercept = 1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_hline(yintercept = 1.3, linetype="dashed", colour="firebrick", alpha=0.5)
+```
+
+
+
+#### Non-adjusted P values
+``` {r, echo=FALSE}
+# plotting
+ggplot(ldlhdl, aes(x=logFC, y=logPValue)) +
+  geom_point(aes(color=sig), alpha=0.7) +
+  scale_color_manual(values=c("orange","firebrick","navy","black"),
+                     labels=c("|FC|>2 & P Value<0.05","|FC|>2","P Value<0.05","Not Sig")) +
+  labs(title="LDL vs HDL", x=expression(paste("log"[2],"(FC)")), y=expression(paste("-log"[10],"(P Value)")), color="Significance") +
+  geom_text_repel(data=filter(ldlhdl, label=="yes"), aes(label=Protein), size=4) +
+  scale_x_continuous(breaks=c(-4,-3,-2,-1,0,1,2,3)) +
+  theme_bw() +
+  theme(legend.background=element_rect(fill="white", size=0.5, linetype="solid", colour="black"), 
+        axis.title=element_text(size=14), legend.text=element_text(hjust=0,size=12),
+        legend.title=element_text(hjust=0.5,size=14),
+        axis.text=element_text(size=12), plot.title=element_text(hjust=0.5, size=18)) +
+  geom_vline(xintercept = -1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_vline(xintercept = 1, linetype="dashed", colour="black", alpha=0.5) +
+  geom_hline(yintercept = 1.3, linetype="dashed", colour="firebrick", alpha=0.5)
+```
+
+#### Supplmental Table: Fold Change & P Values
+```{r}
+# making new table with desired data & names
+ldl_hdl_t <- data.frame("Protein"=ldlhdl$Protein, "Fold Change"=ldl_hdl$FC, "Mean HDL"=ldl_hdl$mean.hdl, "Mean LDL"=ldl_hdl$mean.ldl,
+                        "P-Value"=ldl_hdl$p.value, "BH P-Value"=ldlhdl$AdjPValue, check.names=FALSE, stringsAsFactors=FALSE)
+
+# writing a scrollable embedded html table 
+kbl(ldl_hdl_t, caption="LDL vs HDL") %>%
+  row_spec(0, bold=TRUE) %>%
+  kable_classic(full_width=F, html_font="Times New Roman")
+```
+
+
+
+
+
+
+## Supplemental Bar Graphs: LPA & APOB
+
+
+``` {r}
+# importing and organizing data
+lpa_trans <- read_excel("Lp(a) small volume isolation proteomics.xlsx", sheet="Transposed", col_names=TRUE)
+bar <- data.frame("Lipoprotein"=lpa_trans$Fraction, "Sample"=lpa_trans$Sample, "LPA"=lpa_trans$LPA, "APOB"=lpa_trans$APOB)
+bar$Lipoprotein <- factor(bar$Lipoprotein, levels=c("Lp(a)","HDL","LDL","VLDL"))
+bar$Sample <- factor(bar$Sample, levels=bar$Sample)
+
+# plotting LPA
+ggplot(bar, aes(x=Sample, y=LPA, fill=Lipoprotein)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  scale_y_continuous(expand=c(0,0), limits=c(0,0.17)) +
+  scale_fill_brewer(palette="Pastel1") +
+  labs(title="LPA Across All Lipoprotein Samples", y="LPA Total Normalized PSMs", x=NULL) +
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=18), axis.title.y=element_text(size=14), axis.text.x=element_text(angle=270, vjust=0.5, size=10),
+        legend.title=element_text(size=14))
+
+# plotting APOB
+ggplot(bar, aes(x=Sample, y=APOB, fill=Lipoprotein)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  scale_y_continuous(expand=c(0,0), limits=c(0,0.8)) +
+  scale_fill_brewer(palette="Pastel1") +
+  labs(title="APOB Across All Lipoprotein Samples", y="APOB Total Normalized PSMs", x=NULL) +
+  theme_bw() +
+  theme(plot.title=element_text(hjust=0.5, size=18), axis.title.y=element_text(size=14), axis.text.x=element_text(angle=270, vjust=0.5, size=10), 
+        legend.title=element_text(size=14))
+```
